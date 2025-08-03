@@ -164,7 +164,7 @@ class GameViewModel: ObservableObject {
         revealedLetters = [:]
         
         // Set up revealed letters tracking for middle words
-        for (index, word) in fullWords.enumerated() {
+        for (index, _) in fullWords.enumerated() {
             if index != 0 && index != fullWords.count - 1 {
                 revealedLetters[index] = 1 // First letter is revealed for middle words
             }
@@ -191,7 +191,7 @@ class GameViewModel: ObservableObject {
         let maxLength = targetWords.map { $0.count }.max() ?? 0
         var currentCharIndex = 0
         
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
+        _ = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -226,7 +226,7 @@ class GameViewModel: ObservableObject {
         isAnimating = true
         var index = 0
         
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] timer in
+        _ = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
