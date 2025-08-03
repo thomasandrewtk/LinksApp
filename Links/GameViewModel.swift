@@ -8,6 +8,7 @@
 import SwiftUI
 import Combine
 import Foundation
+import UIKit
 
 class GameViewModel: ObservableObject {
     // MARK: - Published Properties
@@ -67,6 +68,14 @@ class GameViewModel: ObservableObject {
         "🏆 Victory! You're pretty good at this!"
     ]
     
+    private let invalidWordMessages = [
+        "🤨 That's not a real word! Try again.",
+        "😕 Invalid word! Check your spelling.",
+        "🔤 Not in my dictionary! Try another.",
+        "📚 That word doesn't exist! Keep trying.",
+        "❓ Not a valid word! Give it another shot."
+    ]
+    
     // MARK: - Game State
     private var currentWordIndex: Int = 1 // Starting at second word (first guess)
     private var revealedLetters: [Int: Int] = [:] // wordIndex: number of letters revealed
@@ -76,6 +85,7 @@ class GameViewModel: ObservableObject {
     private var lastIncorrectMessage: String = ""
     private var lastGameOverMessage: String = ""
     private var lastVictoryMessage: String = ""
+    private var lastInvalidWordMessage: String = ""
     
     // Countdown timer
     private var gameOverTimer: Timer?
@@ -266,14 +276,20 @@ class GameViewModel: ObservableObject {
         print("Expected word: \(fullWords[currentWordIndex])")
         print("Lives remaining: \(currentLives)")
         
-        let targetWord = fullWords[currentWordIndex]
-        
-        if trimmedGuess.uppercased() == targetWord {
-            print("✅ Correct guess!")
-            handleCorrectGuess()
+        // First check if the word is valid
+        if !isValidWord(trimmedGuess) {
+            print("📚 Invalid word!")
+            handleInvalidWord()
         } else {
-            print("❌ Incorrect guess!")
-            handleIncorrectGuess()
+            let targetWord = fullWords[currentWordIndex]
+            
+            if trimmedGuess.uppercased() == targetWord {
+                print("✅ Correct guess!")
+                handleCorrectGuess()
+            } else {
+                print("❌ Incorrect guess!")
+                handleIncorrectGuess()
+            }
         }
         
         // Clear the guess
@@ -328,6 +344,13 @@ class GameViewModel: ObservableObject {
         }
     }
     
+    private func handleInvalidWord() {
+        print("📚 Invalid word - no life lost")
+        let randomInvalidMessage = getRandomMessage(from: invalidWordMessages, excluding: lastInvalidWordMessage)
+        lastInvalidWordMessage = randomInvalidMessage
+        animateMessageChange(to: randomInvalidMessage)
+    }
+    
     private func giveHint() {
         let currentRevealed = revealedLetters[currentWordIndex] ?? 1
         let targetWord = fullWords[currentWordIndex]
@@ -343,6 +366,30 @@ class GameViewModel: ObservableObject {
             
             print("Hint: Word is now shown as: \(wordChain[currentWordIndex])")
         }
+    }
+    
+    // MARK: - Word Validation
+    private func isValidWord(_ word: String) -> Bool {
+        let trimmedWord = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Basic checks - must be at least 2 characters and contain only letters
+        guard trimmedWord.count >= 2 && trimmedWord.allSatisfy({ $0.isLetter }) else {
+            return false
+        }
+        
+        // Use iOS spell checker to validate the word
+        let textChecker = UITextChecker()
+        let range = NSRange(location: 0, length: trimmedWord.utf16.count)
+        let misspelledRange = textChecker.rangeOfMisspelledWord(
+            in: trimmedWord,
+            range: range,
+            startingAt: 0,
+            wrap: false,
+            language: "en"
+        )
+        
+        // If rangeOfMisspelledWord returns NSNotFound, the word is valid
+        return misspelledRange.location == NSNotFound
     }
     
     // MARK: - Helper Methods
@@ -363,6 +410,7 @@ class GameViewModel: ObservableObject {
         lastIncorrectMessage = ""
         lastGameOverMessage = ""
         lastVictoryMessage = ""
+        lastInvalidWordMessage = ""
         // Clear any existing timers
         gameOverTimer?.invalidate()
         countdownTimer?.invalidate()
@@ -392,8 +440,8 @@ class GameViewModel: ObservableObject {
     
     // MARK: - Game Over Sequence
     private func startGameOverSequence() {
-        // Wait 5 seconds, then start countdown
-        gameOverTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+        // Wait 2.5 seconds, then start countdown
+        gameOverTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
             self?.startCountdownToMidnight()
         }
     }
