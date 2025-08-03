@@ -13,10 +13,14 @@ class GameViewModel: ObservableObject {
     // MARK: - Published Properties
     @Published var currentGuess: String = ""
     @Published var currentLives: Int = 5
-    @Published var currentPrompt: String = "🤔 What word comes after ROAD?"
-    @Published var displayedPrompt: String = "🤔 What word comes after ROAD?"
+    @Published var currentPrompt: String = ""
+    @Published var displayedPrompt: String = ""
+    @Published var displayedFirstLine: String = ""
     @Published var wordChain: [String] = []
-    @Published var isGameActive: Bool = true
+    @Published var isGameActive: Bool = false
+    @Published var isAnimating: Bool = false
+    @Published var isContentReady: Bool = false
+    @Published var showFirstLine: Bool = false
     
     // MARK: - Game Configuration
     let maxLives: Int = 5
@@ -79,23 +83,35 @@ class GameViewModel: ObservableObject {
     
     // Typewriter animation
     private var typewriterTimer: Timer?
-    private var isAnimating: Bool = false
     private var targetMessage: String = ""
     
     // Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
     
     init() {
-        // Load today's puzzle
+        // Start completely blank, load content silently
         loadTodaysPuzzle()
+    }
+    
+    // MARK: - Content Ready
+    private func markContentReady() {
+        isContentReady = true
+        showFirstLine = true
+        print("✅ Content loaded and ready")
+        
+        // Typewrite the first line, then animate word chain
+        let firstLine = "Can you solve today's links? \(puzzleDate)"
+        animateFirstLine(to: firstLine) {
+            // After first line completes, animate word chain
+            self.animateWordChainSimultaneous()
+        }
     }
     
     // MARK: - Puzzle Loading
     private func loadTodaysPuzzle() {
         // Check if we already have today's puzzle
         if let puzzle = puzzleService.todaysPuzzle {
-            fullWords = puzzle.words
-            setupInitialWordChain()
+            finishLoadingWithPuzzle(puzzle)
             print("✅ Using cached puzzle for \(puzzle.date)")
         } else {
             // Fetch from server
@@ -103,17 +119,17 @@ class GameViewModel: ObservableObject {
                 await puzzleService.fetchTodaysPuzzle()
                 await MainActor.run {
                     if let puzzle = self.puzzleService.todaysPuzzle {
-                        self.fullWords = puzzle.words
-                        self.setupInitialWordChain()
+                        self.finishLoadingWithPuzzle(puzzle)
                         print("✅ Loaded puzzle for \(puzzle.date)")
                     }
                 }
             }
         }
         
-        // Listen for puzzle updates (like at midnight)
+        // Listen for puzzle updates (like at midnight) - but not the initial load
         puzzleService.$todaysPuzzle
             .compactMap { $0 }
+            .dropFirst() // Skip the first emission to avoid duplicate processing
             .sink { [weak self] puzzle in
                 self?.fullWords = puzzle.words
                 self?.resetGame() // Reset game with new puzzle
@@ -122,29 +138,121 @@ class GameViewModel: ObservableObject {
             .store(in: &cancellables)
     }
     
+    private func finishLoadingWithPuzzle(_ puzzle: DailyPuzzle) {
+        fullWords = puzzle.words
+        setupInitialWordChain()
+        markContentReady()
+    }
+    
     // MARK: - Setup
     private func setupInitialWordChain() {
         // Don't setup if we don't have words yet
         guard !fullWords.isEmpty else { return }
         
-        wordChain = []
+        // Initialize empty word chain for animation, but setup revealed letters
+        wordChain = Array(repeating: "", count: fullWords.count)
         revealedLetters = [:]
+        
+        // Set up revealed letters tracking for middle words
+        for (index, word) in fullWords.enumerated() {
+            if index != 0 && index != fullWords.count - 1 {
+                revealedLetters[index] = 1 // First letter is revealed for middle words
+            }
+        }
+    }
+    
+    // MARK: - Word Chain Animation
+    private func animateWordChainSimultaneous() {
+        // Prepare target words for animation
+        var targetWords: [String] = []
         
         for (index, word) in fullWords.enumerated() {
             if index == 0 || index == fullWords.count - 1 {
                 // First and last words are fully revealed
-                wordChain.append(word)
+                targetWords.append(word)
             } else {
                 // Middle words show first letter + underscores
                 let hiddenWord = String(word.prefix(1)) + String(repeating: "_", count: word.count - 1)
-                wordChain.append(hiddenWord)
-                revealedLetters[index] = 1 // First letter is revealed
+                targetWords.append(hiddenWord)
             }
+        }
+        
+        // Find the maximum word length to know when to stop
+        let maxLength = targetWords.map { $0.count }.max() ?? 0
+        var currentCharIndex = 0
+        
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            
+            // Update each word simultaneously
+            for wordIndex in 0..<targetWords.count {
+                let targetWord = targetWords[wordIndex]
+                let currentLength = min(currentCharIndex + 1, targetWord.count)
+                self.wordChain[wordIndex] = String(targetWord.prefix(currentLength))
+            }
+            
+            currentCharIndex += 1
+            
+            // Stop when we've revealed all characters of the longest word
+            if currentCharIndex >= maxLength {
+                timer.invalidate()
+                print("🎬 Word chain animation complete")
+                // Start final step: host message and activate game
+                self.startGame()
+            }
+        }
+    }
+    
+    // MARK: - First Line Animation
+    private func animateFirstLine(to newMessage: String, completion: (() -> Void)? = nil) {
+        guard !isAnimating else { 
+            completion?()
+            return 
+        }
+        
+        isAnimating = true
+        var index = 0
+        
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            
+            if index < newMessage.count {
+                index += 1
+                self.displayedFirstLine = String(newMessage.prefix(index))
+            } else {
+                timer.invalidate()
+                self.isAnimating = false
+                self.displayedFirstLine = newMessage
+                completion?()
+            }
+        }
+    }
+    
+    // MARK: - Game Activation
+    private func startGame() {
+        // Typewrite the host message
+        let hostMessage = "🤔 What word comes after \(fullWords[0])?"
+        animateMessageChange(to: hostMessage, speed: .normal) {
+            // After host message completes, activate the game
+            self.isGameActive = true
+            print("🎮 Game is now active and ready for input")
         }
     }
     
     // MARK: - Business Logic
     func submitGuess() {
+        // Don't submit if animating
+        guard !isAnimating else {
+            print("⚠️ Guess blocked during animation")
+            return
+        }
+        
         // Don't submit empty or whitespace-only guesses
         let trimmedGuess = currentGuess.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGuess.isEmpty else {
@@ -246,7 +354,10 @@ class GameViewModel: ObservableObject {
         let initialPrompt = "🤔 What word comes after ROAD?"
         currentPrompt = initialPrompt
         displayedPrompt = initialPrompt
-        isGameActive = true
+        isGameActive = false
+        isContentReady = false
+        showFirstLine = false
+        displayedFirstLine = ""
         // Reset message tracking
         lastNextWordMessage = ""
         lastIncorrectMessage = ""
@@ -343,23 +454,44 @@ class GameViewModel: ObservableObject {
     }
     
     // MARK: - Typewriter Animation
-    private func animateMessageChange(to newMessage: String) {
+    enum AnimationSpeed {
+        case fast, normal
+        
+        var wipeInterval: TimeInterval {
+            switch self {
+            case .fast: return 0.005
+            case .normal: return 0.015
+            }
+        }
+        
+        var typeInterval: TimeInterval {
+            switch self {
+            case .fast: return 0.008
+            case .normal: return 0.025
+            }
+        }
+    }
+    
+    private func animateMessageChange(to newMessage: String, speed: AnimationSpeed = .normal, completion: (() -> Void)? = nil) {
         // Don't animate if already animating or if message is the same
-        guard !isAnimating && newMessage != displayedPrompt else { return }
+        guard !isAnimating && newMessage != displayedPrompt else { 
+            completion?()
+            return 
+        }
         
         isAnimating = true
         targetMessage = newMessage
         currentPrompt = newMessage // Update the internal state
         
         // Start with wiping the current text
-        wipeCurrentText()
+        wipeCurrentText(speed: speed, completion: completion)
     }
     
-    private func wipeCurrentText() {
+    private func wipeCurrentText(speed: AnimationSpeed, completion: (() -> Void)?) {
         let currentText = displayedPrompt
         var index = currentText.count
         
-        typewriterTimer = Timer.scheduledTimer(withTimeInterval: 0.015, repeats: true) { [weak self] timer in
+        typewriterTimer = Timer.scheduledTimer(withTimeInterval: speed.wipeInterval, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -371,15 +503,15 @@ class GameViewModel: ObservableObject {
             } else {
                 timer.invalidate()
                 // Start typing the new message
-                self.typeNewText()
+                self.typeNewText(speed: speed, completion: completion)
             }
         }
     }
     
-    private func typeNewText() {
+    private func typeNewText(speed: AnimationSpeed, completion: (() -> Void)?) {
         var index = 0
         
-        typewriterTimer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] timer in
+        typewriterTimer = Timer.scheduledTimer(withTimeInterval: speed.typeInterval, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -392,6 +524,7 @@ class GameViewModel: ObservableObject {
                 timer.invalidate()
                 self.isAnimating = false
                 self.displayedPrompt = self.targetMessage
+                completion?()
             }
         }
     }

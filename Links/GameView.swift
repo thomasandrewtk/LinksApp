@@ -23,7 +23,10 @@ struct GameView: View {
     
     // MARK: - Computed Properties
     private var canSubmit: Bool {
-        viewModel.isGameActive && !viewModel.currentGuess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        viewModel.isGameActive && 
+        viewModel.isContentReady &&
+        !viewModel.isAnimating && 
+        !viewModel.currentGuess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     
     var body: some View {
@@ -43,11 +46,14 @@ struct GameView: View {
         .background(backgroundColor)
         .preferredColorScheme(.dark)
         .onAppear {
-            isTextFieldFocused = viewModel.isGameActive
+            isTextFieldFocused = false // Start unfocused
         }
         .onChange(of: viewModel.isGameActive) { _, isActive in
-            if !isActive {
-                isTextFieldFocused = false
+            if isActive {
+                // Focus text field when game becomes active
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    isTextFieldFocused = true
+                }
             }
         }
     }
@@ -84,28 +90,37 @@ struct GameView: View {
     // MARK: - Main Puzzle Content
     private var puzzleContentView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Puzzle intro
-            Text("Can you solve today's links? \(viewModel.puzzleDate)")
-                .font(.system(size: 14, design: .monospaced))
-                .foregroundColor(textColor)
-            
-            // Empty line for spacing
-            Text("")
-            
-            // Word chain display
-            ForEach(Array(viewModel.wordChain.enumerated()), id: \.offset) { index, word in
-                Text(word)
+            // Show the first line once content is ready
+            if viewModel.showFirstLine {
+                // First line (typewritten)
+                Text(viewModel.displayedFirstLine)
                     .font(.system(size: 14, design: .monospaced))
                     .foregroundColor(textColor)
+                
+                // Show word chain if it has content (starts animating after first line)
+                if !viewModel.wordChain.isEmpty {
+                    // Empty line for spacing
+                    Text("")
+                    
+                    // Word chain display
+                    ForEach(Array(viewModel.wordChain.enumerated()), id: \.offset) { index, word in
+                        Text(word)
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(textColor)
+                    }
+                    
+                    // Show host message when there's content to display
+                    if !viewModel.displayedPrompt.isEmpty {
+                        // Empty line for spacing
+                        Text("")
+                        
+                        // Host message (typewritten)
+                        Text(viewModel.displayedPrompt)
+                            .font(.system(size: 14, design: .monospaced))
+                            .foregroundColor(textColor)
+                    }
+                }
             }
-            
-            // Empty line for spacing
-            Text("")
-            
-            // Current prompt with typewriter animation
-            Text(viewModel.displayedPrompt)
-                .font(.system(size: 14, design: .monospaced))
-                .foregroundColor(textColor)
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)
@@ -124,9 +139,9 @@ struct GameView: View {
                 .disableAutocorrection(true)
                 .keyboardType(.asciiCapable)
                 .focused($isTextFieldFocused)
-                .disabled(!viewModel.isGameActive)
+                .disabled(!viewModel.isGameActive || !viewModel.isContentReady)
                 .onSubmit {
-                    if viewModel.isGameActive && !viewModel.currentGuess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if canSubmit {
                         viewModel.submitGuess()
                         isTextFieldFocused = true
                     }
@@ -134,7 +149,7 @@ struct GameView: View {
                 .padding(.leading, 12)
             
             Button(action: {
-                if viewModel.isGameActive && !viewModel.currentGuess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if canSubmit {
                     viewModel.submitGuess()
                     isTextFieldFocused = true
                 }
