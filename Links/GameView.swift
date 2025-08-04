@@ -13,6 +13,7 @@ struct GameView: View {
     @StateObject private var viewModel = GameViewModel()
     @FocusState private var isTextFieldFocused: Bool
     @State private var isWiping = false
+    @State private var showingInfo = false
     
     // MARK: - Color Scheme (Always Dark Mode)
     private var backgroundColor: Color {
@@ -48,6 +49,9 @@ struct GameView: View {
         }
         .background(backgroundColor)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showingInfo) {
+            InfoView()
+        }
         .onAppear {
             isTextFieldFocused = false // Start unfocused
         }
@@ -70,6 +74,10 @@ struct GameView: View {
                     .foregroundColor(isWiping ? .red : textColor)
                     .scaleEffect(isWiping ? 1.1 : 1.0)
                     .animation(.easeInOut(duration: 0.2), value: isWiping)
+                    .onTapGesture(count: 1) {
+                        // Single tap shows info screen
+                        showingInfo = true
+                    }
                     .onTapGesture(count: 3) {
                         print("🧨 Triple-tap detected! Wiping all data...")
                         

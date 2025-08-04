@@ -674,6 +674,11 @@ class GameViewModel: ObservableObject {
         
         // Update the local completion object
         completion.markCompleted(livesUsed: livesUsed, didWin: didWin)
+        
+        // Cancel today's reminder notification since game is completed
+        Task {
+            await NotificationManager.shared.onGameCompleted()
+        }
     }
     
     // MARK: - Debug Methods
@@ -690,6 +695,11 @@ class GameViewModel: ObservableObject {
         // Wipe all SwiftData
         completionService.wipeAllData()
         
+        // Clear all notifications
+        Task {
+            await NotificationManager.shared.clearAllNotifications()
+        }
+        
         // Completely reset to initial state
         completelyResetToInitialState()
         
@@ -699,6 +709,11 @@ class GameViewModel: ObservableObject {
         // Give a brief moment for everything to settle, then restart fresh
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.waitForSwiftDataAndLoadPuzzle()
+            
+            // Reschedule notifications after reset
+            Task {
+                await NotificationManager.shared.requestPermissionAndSchedule()
+            }
         }
         
         print("🔄 Complete app reinitialization initiated!")

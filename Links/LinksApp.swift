@@ -13,6 +13,12 @@ struct LinksApp: App {
     var body: some Scene {
         WindowGroup {
             GameView()
+                .onAppear {
+                    // Initialize notifications on app launch
+                    Task {
+                        await NotificationManager.shared.requestPermissionAndSchedule()
+                    }
+                }
         }
         .modelContainer(for: GameCompletion.self) { result in
             do {
