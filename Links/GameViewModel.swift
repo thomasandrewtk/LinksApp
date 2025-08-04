@@ -9,6 +9,7 @@ import SwiftUI
 import Combine
 import Foundation
 import UIKit
+import SwiftData
 
 class GameViewModel: ObservableObject {
     // MARK: - Published Properties
@@ -22,18 +23,27 @@ class GameViewModel: ObservableObject {
     @Published var isAnimating: Bool = false
     @Published var isContentReady: Bool = false
     @Published var showFirstLine: Bool = false
+    @Published var hasServerError: Bool = false
     
     // MARK: - Game Configuration
-    let maxLives: Int = 5
+    let maxLives: Int = GameConstants.maxLives
     var puzzleDate: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "M/d/yyyy"
+        formatter.dateFormat = GameConstants.DateFormats.display
         return formatter.string(from: Date())
     }
     
     // MARK: - Game Data
     @Published var fullWords: [String] = []
     private let puzzleService = PuzzleService.shared
+    private let completionService = GameCompletionService.shared
+    
+    // MARK: - Game Completion Tracking
+    @Published var currentGameCompletion: GameCompletion?
+    @Published var isPlayingPreviousGame: Bool = false
+    var currentGameDate: String {
+        return currentGameCompletion?.gameDate ?? GameCompletion.todayDateString()
+    }
     
     // MARK: - Host Messages with Personality
     private let nextWordMessages = [
@@ -77,7 +87,7 @@ class GameViewModel: ObservableObject {
     ]
     
     // MARK: - Game State
-    private var currentWordIndex: Int = 1 // Starting at second word (first guess)
+    private var currentWordIndex: Int = GameConstants.startingWordIndex // Starting at second word (first guess)
     private var revealedLetters: [Int: Int] = [:] // wordIndex: number of letters revealed
     
     // Track last used messages to avoid repeats
@@ -98,23 +108,99 @@ class GameViewModel: ObservableObject {
     // Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
     
+    // Timer to check for SwiftData readiness
+    private var readinessTimer: Timer?
+    
     init() {
-        // Start completely blank, load content silently
+        // Start completely blank, wait for SwiftData to be ready before loading content
+        waitForSwiftDataAndLoadPuzzle()
+    }
+    
+    // MARK: - SwiftData Readiness Check
+    private func waitForSwiftDataAndLoadPuzzle() {
+        // Check if SwiftData is already ready
+        if completionService.isReady {
+            print("✅ SwiftData ready immediately, loading puzzle")
+            loadTodaysPuzzle()
+            return
+        }
+        
+        // Otherwise, poll until it's ready
+        print("⏳ Waiting for SwiftData to be ready...")
+        readinessTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            
+            Task { @MainActor in
+                if self.completionService.isReady {
+                    print("✅ SwiftData ready, loading puzzle")
+                    // Invalidate timer on main actor
+                    self.readinessTimer?.invalidate()
+                    self.readinessTimer = nil
+                    self.loadTodaysPuzzle()
+                }
+            }
+        }
+    }
+    
+    // MARK: - Game Selection
+    func playTodaysGame() {
+        isPlayingPreviousGame = false
         loadTodaysPuzzle()
+    }
+    
+    func playPreviousGame(completion: GameCompletion, puzzle: DailyPuzzle) {
+        isPlayingPreviousGame = true
+        currentGameCompletion = completion
+        fullWords = puzzle.words
+        
+        // Restore game state from completion record
+        restoreGameState(from: completion)
+        markContentReady()
+    }
+    
+    func canPlayYesterdaysGame() -> Bool {
+        return completionService.getYesterdayGameIfIncomplete() != nil
     }
     
     // MARK: - Content Ready
     private func markContentReady() {
+        hasServerError = false
         isContentReady = true
-        showFirstLine = true
+        showFirstLine = false  // Start with nothing visible
         print("✅ Content loaded and ready")
         
-        // Typewrite the first line, then animate word chain
+        // Ensure clean state before animation
+        displayedFirstLine = ""
+        displayedPrompt = ""
+        
+        // Start the animation sequence: first line -> word chain -> host message
         let firstLine = "Can you solve today's links? \(puzzleDate)"
+        showFirstLine = true
         animateFirstLine(to: firstLine) {
             // After first line completes, animate word chain
             self.animateWordChainSimultaneous()
         }
+    }
+    
+    // MARK: - Server Error State
+    private func markServerError() {
+        hasServerError = true
+        isContentReady = false
+        showFirstLine = false  // Start with nothing visible
+        isGameActive = false
+        print("❌ Server error state activated")
+        
+        // Ensure clean state before animation
+        displayedFirstLine = ""
+        displayedPrompt = ""
+        
+        // Show random snarky error message with animation
+        let errorMessage = GameConstants.ServerErrorMessages.randomMessage()
+        showFirstLine = true
+        animateFirstLine(to: errorMessage)
     }
     
     // MARK: - Puzzle Loading
@@ -129,8 +215,16 @@ class GameViewModel: ObservableObject {
                 await puzzleService.fetchTodaysPuzzle()
                 await MainActor.run {
                     if let puzzle = self.puzzleService.todaysPuzzle {
-                        self.finishLoadingWithPuzzle(puzzle)
-                        print("✅ Loaded puzzle for \(puzzle.date)")
+                        // Check if this is the fallback puzzle due to server error
+                        if puzzle.date == "fallback" && self.puzzleService.lastFetchError != nil {
+                            self.markServerError()
+                        } else {
+                            self.finishLoadingWithPuzzle(puzzle)
+                            print("✅ Loaded puzzle for \(puzzle.date)")
+                        }
+                    } else {
+                        // No puzzle at all
+                        self.markServerError()
                     }
                 }
             }
@@ -149,9 +243,53 @@ class GameViewModel: ObservableObject {
     }
     
     private func finishLoadingWithPuzzle(_ puzzle: DailyPuzzle) {
+        // Validate puzzle has the expected number of words
+        if puzzle.words.count != GameConstants.expectedWordCount {
+            print("⚠️ Puzzle has \(puzzle.words.count) words, expected \(GameConstants.expectedWordCount)")
+            // Still proceed but log the warning
+        }
+        
         fullWords = puzzle.words
-        setupInitialWordChain()
+        
+        // Get or create completion record for this game
+        if let existingCompletion = completionService.getGameCompletion(for: puzzle.date) {
+            currentGameCompletion = existingCompletion
+            
+            // If game is already completed, show completion state
+            if existingCompletion.isCompleted {
+                setupCompletedGameState(from: existingCompletion)
+            } else {
+                // Resume from where user left off
+                restoreGameState(from: existingCompletion)
+            }
+        } else {
+            // Create new game completion record
+            currentGameCompletion = completionService.createGameCompletion(for: puzzle.date, totalWords: puzzle.words.count)
+            setupInitialWordChain()
+        }
+        
         markContentReady()
+    }
+    
+    private func restoreGameState(from completion: GameCompletion) {
+        // Restore game progress
+        currentLives = maxLives - completion.livesUsed
+        currentWordIndex = completion.currentWordIndex
+        revealedLetters = completion.revealedLetters
+        
+        print("🔄 Restored game state: word \(currentWordIndex), lives \(currentLives)")
+        print("🎯 Animation will show restored state with \(completion.revealedLetters.count) words with revealed letters")
+    }
+    
+    private func setupCompletedGameState(from completion: GameCompletion) {
+        // Restore the final game state
+        currentLives = maxLives - completion.livesUsed
+        currentWordIndex = completion.currentWordIndex
+        revealedLetters = completion.revealedLetters
+        isGameActive = false
+        
+        print("🎯 Showing completed game state - \(completion.didWin ? "Victory" : "Game Over")")
+        print("📊 Completion stats: \(completion.wordsCompleted)/\(completion.totalWords) words, \(completion.livesUsed) lives used, Won: \(completion.didWin)")
     }
     
     // MARK: - Setup
@@ -171,27 +309,46 @@ class GameViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Word Chain Animation
-    private func animateWordChainSimultaneous() {
-        // Prepare target words for animation
+    // MARK: - Word Chain Target Building
+    private func buildWordChainTarget() -> [String] {
         var targetWords: [String] = []
         
         for (index, word) in fullWords.enumerated() {
             if index == 0 || index == fullWords.count - 1 {
-                // First and last words are fully revealed
+                // First and last words are always fully revealed
                 targetWords.append(word)
+            } else if index < currentWordIndex {
+                // Words that have been correctly guessed are fully revealed
+                targetWords.append(word)
+            } else if index == currentWordIndex {
+                // Current word shows revealed letters
+                let revealedCount = revealedLetters[index] ?? 1
+                let revealedPart = String(word.prefix(revealedCount))
+                let hiddenPart = String(repeating: "_", count: word.count - revealedCount)
+                targetWords.append(revealedPart + hiddenPart)
             } else {
-                // Middle words show first letter + underscores
+                // Future words show first letter + underscores
                 let hiddenWord = String(word.prefix(1)) + String(repeating: "_", count: word.count - 1)
                 targetWords.append(hiddenWord)
             }
         }
         
+        return targetWords
+    }
+    
+    // MARK: - Word Chain Animation
+    private func animateWordChainSimultaneous() {
+        // Build target words based on current game state
+        let targetWords = buildWordChainTarget()
+        
+        // Reset word chain to empty for animation
+        wordChain = Array(repeating: "", count: fullWords.count)
+        
         // Find the maximum word length to know when to stop
         let maxLength = targetWords.map { $0.count }.max() ?? 0
         var currentCharIndex = 0
         
-        _ = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
+        _ = Timer.scheduledTimer(withTimeInterval: GameConstants.Animation.wordChainRevealSpeed, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -226,7 +383,7 @@ class GameViewModel: ObservableObject {
         isAnimating = true
         var index = 0
         
-        _ = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] timer in
+        _ = Timer.scheduledTimer(withTimeInterval: GameConstants.Animation.firstLineTypewriterSpeed, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -246,12 +403,44 @@ class GameViewModel: ObservableObject {
     
     // MARK: - Game Activation
     private func startGame() {
-        // Typewrite the host message
-        let hostMessage = "🤔 What word comes after \(fullWords[0])?"
-        animateMessageChange(to: hostMessage, speed: .normal) {
-            // After host message completes, activate the game
-            self.isGameActive = true
-            print("🎮 Game is now active and ready for input")
+        // Check if this is a completed game
+        if let completion = currentGameCompletion, completion.isCompleted {
+            if completion.didWin {
+                // Show victory message for completed game
+                let randomVictory = getRandomMessage(from: victoryMessages, excluding: lastVictoryMessage)
+                lastVictoryMessage = randomVictory
+                animateMessageChange(to: randomVictory) {
+                    self.startGameOverSequence()
+                }
+                print("🎉 SHOWING COMPLETED VICTORY STATE")
+            } else {
+                // Show game over message for failed game
+                let randomGameOver = getRandomMessage(from: gameOverMessages, excluding: lastGameOverMessage)
+                lastGameOverMessage = randomGameOver
+                animateMessageChange(to: randomGameOver) {
+                    self.startGameOverSequence()
+                }
+                print("💀 SHOWING COMPLETED GAME OVER STATE")
+            }
+        } else {
+            // Active game - show prompt appropriate for current state
+            let hostMessage: String
+            if currentWordIndex == 1 {
+                // First guess - asking about what comes after the first word
+                hostMessage = "🤔 What word comes after \(fullWords[0])?"
+            } else {
+                // Restored game in progress - asking about what comes after the previous correctly guessed word
+                let previousWord = fullWords[currentWordIndex - 1]
+                let randomMessage = getRandomMessage(from: nextWordMessages, excluding: lastNextWordMessage)
+                lastNextWordMessage = randomMessage
+                hostMessage = "\(randomMessage) \(previousWord)?"
+            }
+            
+            animateMessageChange(to: hostMessage, speed: .normal) {
+                // After host message completes, activate the game
+                self.isGameActive = true
+                print("🎮 Game is now active and ready for input")
+            }
         }
     }
     
@@ -306,6 +495,9 @@ class GameViewModel: ObservableObject {
         // Move to next word
         currentWordIndex += 1
         
+        // Update completion tracking
+        updateGameProgress()
+        
         if currentWordIndex < fullWords.count - 1 {
             let previousWord = fullWords[currentWordIndex - 1]
             let randomMessage = getRandomMessage(from: nextWordMessages, excluding: lastNextWordMessage)
@@ -314,6 +506,8 @@ class GameViewModel: ObservableObject {
             animateMessageChange(to: newPrompt)
             print("New prompt: \(newPrompt)")
         } else {
+            // Game completed!
+            completeGame()
             let randomVictory = getRandomMessage(from: victoryMessages, excluding: lastVictoryMessage)
             lastVictoryMessage = randomVictory
             animateMessageChange(to: randomVictory)
@@ -327,7 +521,14 @@ class GameViewModel: ObservableObject {
         currentLives -= 1
         print("Lives lost! Now at: \(currentLives)/\(maxLives)")
         
+        // Update lives used in completion tracking
+        updateLivesUsed()
+        
         if currentLives <= 0 {
+            // Game failed! Update final progress and mark as completed
+            updateGameProgress()
+            completeGame()
+            
             let randomGameOver = getRandomMessage(from: gameOverMessages, excluding: lastGameOverMessage)
             lastGameOverMessage = randomGameOver
             animateMessageChange(to: randomGameOver)
@@ -337,10 +538,48 @@ class GameViewModel: ObservableObject {
         } else {
             // Give a hint by revealing the next letter
             giveHint()
-            let randomIncorrect = getRandomMessage(from: incorrectMessages, excluding: lastIncorrectMessage)
-            lastIncorrectMessage = randomIncorrect
-            animateMessageChange(to: randomIncorrect)
-            print("Giving hint - revealed another letter")
+            
+            // Check if the word is now fully revealed through hints
+            let targetWord = fullWords[currentWordIndex]
+            let revealedCount = revealedLetters[currentWordIndex] ?? 1
+            
+            if revealedCount >= targetWord.count {
+                // Word is fully revealed through hints - automatically advance
+                print("🎯 Word '\(targetWord)' fully revealed through hints - auto-advancing!")
+                
+                // Move to next word (same logic as handleCorrectGuess)
+                currentWordIndex += 1
+                
+                // Update progress
+                updateGameProgress()
+                
+                if currentWordIndex < fullWords.count - 1 {
+                    let previousWord = fullWords[currentWordIndex - 1]
+                    let randomMessage = getRandomMessage(from: nextWordMessages, excluding: lastNextWordMessage)
+                    lastNextWordMessage = randomMessage
+                    let newPrompt = "\(randomMessage) \(previousWord)?"
+                    animateMessageChange(to: newPrompt)
+                    print("New prompt: \(newPrompt)")
+                } else {
+                    // Game completed!
+                    completeGame()
+                    let randomVictory = getRandomMessage(from: victoryMessages, excluding: lastVictoryMessage)
+                    lastVictoryMessage = randomVictory
+                    animateMessageChange(to: randomVictory)
+                    isGameActive = false
+                    startGameOverSequence()
+                    print("🎉 PUZZLE COMPLETE!")
+                }
+            } else {
+                // Word not fully revealed yet - show incorrect message and continue
+                let randomIncorrect = getRandomMessage(from: incorrectMessages, excluding: lastIncorrectMessage)
+                lastIncorrectMessage = randomIncorrect
+                animateMessageChange(to: randomIncorrect)
+                print("Giving hint - revealed another letter")
+            }
+            
+            // Update progress with new revealed letters
+            updateGameProgress()
         }
     }
     
@@ -365,6 +604,13 @@ class GameViewModel: ObservableObject {
             wordChain[currentWordIndex] = revealedPart + hiddenPart
             
             print("Hint: Word is now shown as: \(wordChain[currentWordIndex])")
+            
+            // Check if word is now fully revealed through hints
+            if newRevealed >= targetWord.count {
+                print("🎯 Word '\(targetWord)' is now fully revealed through hints!")
+                // The status indicator will automatically update through getWordStatus()
+                // and the UI will refresh to show the checkmark
+            }
         }
     }
     
@@ -372,8 +618,8 @@ class GameViewModel: ObservableObject {
     private func isValidWord(_ word: String) -> Bool {
         let trimmedWord = word.trimmingCharacters(in: .whitespacesAndNewlines)
         
-        // Basic checks - must be at least 2 characters and contain only letters
-        guard trimmedWord.count >= 2 && trimmedWord.allSatisfy({ $0.isLetter }) else {
+        // Basic checks - must be at least minimum length and contain only letters
+        guard trimmedWord.count >= GameConstants.Validation.minimumWordLength && trimmedWord.allSatisfy({ $0.isLetter }) else {
             return false
         }
         
@@ -385,11 +631,126 @@ class GameViewModel: ObservableObject {
             range: range,
             startingAt: 0,
             wrap: false,
-            language: "en"
+            language: GameConstants.Validation.spellCheckLanguage
         )
         
         // If rangeOfMisspelledWord returns NSNotFound, the word is valid
         return misspelledRange.location == NSNotFound
+    }
+    
+    // MARK: - Game Completion Tracking Methods
+    private func updateGameProgress() {
+        guard let completion = currentGameCompletion else { return }
+        
+        let wordsCompleted = currentWordIndex - 1 // Subtract 1 because index is for next word
+        print("📈 Updating progress: \(wordsCompleted) words completed, currentWordIndex: \(currentWordIndex)")
+        
+        completionService.updateProgress(
+            for: completion.gameDate,
+            wordsCompleted: wordsCompleted,
+            currentWordIndex: currentWordIndex,
+            revealedLetters: revealedLetters
+        )
+    }
+    
+    private func updateLivesUsed() {
+        guard let completion = currentGameCompletion else { return }
+        
+        let livesUsed = maxLives - currentLives
+        completionService.updateLivesUsed(for: completion.gameDate, livesUsed: livesUsed)
+    }
+    
+    private func completeGame() {
+        guard let completion = currentGameCompletion else { return }
+        
+        let livesUsed = maxLives - currentLives
+        // Win if we completed all words, lose if we ran out of lives
+        let didWin = currentWordIndex >= fullWords.count - 1 && currentLives > 0
+        
+        print("🏁 Completing game: \(completion.wordsCompleted)/\(completion.totalWords) words, \(livesUsed) lives used")
+        print("📊 Result: \(didWin ? "VICTORY" : "DEFEAT")")
+        
+        completionService.markGameCompleted(for: completion.gameDate, livesUsed: livesUsed, didWin: didWin)
+        
+        // Update the local completion object
+        completion.markCompleted(livesUsed: livesUsed, didWin: didWin)
+    }
+    
+    // MARK: - Debug Methods
+    func wipeAllDataAndReset() {
+        print("🧨 DEBUG: Wiping all data and completely reinitializing app...")
+        
+        // Stop all timers and animations first
+        readinessTimer?.invalidate()
+        gameOverTimer?.invalidate()
+        countdownTimer?.invalidate()
+        typewriterTimer?.invalidate()
+        isAnimating = false
+        
+        // Wipe all SwiftData
+        completionService.wipeAllData()
+        
+        // Completely reset to initial state
+        completelyResetToInitialState()
+        
+        // Clear any cached puzzle data in the service
+        puzzleService.clearCache()
+        
+        // Give a brief moment for everything to settle, then restart fresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.waitForSwiftDataAndLoadPuzzle()
+        }
+        
+        print("🔄 Complete app reinitialization initiated!")
+    }
+    
+    // MARK: - Complete State Reset
+    private func completelyResetToInitialState() {
+        print("🔄 COMPLETELY RESETTING TO INITIAL STATE")
+        
+        // Reset all @Published properties to initial values
+        currentGuess = ""
+        currentLives = maxLives
+        currentPrompt = ""
+        displayedPrompt = ""
+        displayedFirstLine = ""
+        wordChain = []
+        isGameActive = false
+        isAnimating = false
+        isContentReady = false
+        showFirstLine = false
+        hasServerError = false
+        
+        // Reset game data
+        fullWords = []
+        currentWordIndex = GameConstants.startingWordIndex
+        revealedLetters = [:]
+        
+        // Reset message tracking
+        lastNextWordMessage = ""
+        lastIncorrectMessage = ""
+        lastGameOverMessage = ""
+        lastVictoryMessage = ""
+        lastInvalidWordMessage = ""
+        
+        // Reset completion tracking
+        currentGameCompletion = nil
+        isPlayingPreviousGame = false
+        
+        // Clear target message for typewriter
+        targetMessage = ""
+        
+        // Invalidate any remaining timers (defensive)
+        readinessTimer?.invalidate()
+        gameOverTimer?.invalidate()
+        countdownTimer?.invalidate()
+        typewriterTimer?.invalidate()
+        
+        // Clear all timer references
+        readinessTimer = nil
+        gameOverTimer = nil
+        countdownTimer = nil
+        typewriterTimer = nil
     }
     
     // MARK: - Helper Methods
@@ -397,14 +758,16 @@ class GameViewModel: ObservableObject {
         print("🔄 RESETTING GAME")
         currentGuess = ""
         currentLives = maxLives
-        currentWordIndex = 1
-        let initialPrompt = "🤔 What word comes after ROAD?"
-        currentPrompt = initialPrompt
-        displayedPrompt = initialPrompt
+        currentWordIndex = GameConstants.startingWordIndex
+        
+        // Reset prompt state - will be set through animation later
+        currentPrompt = ""
+        displayedPrompt = ""
         isGameActive = false
         isContentReady = false
         showFirstLine = false
         displayedFirstLine = ""
+        hasServerError = false
         // Reset message tracking
         lastNextWordMessage = ""
         lastIncorrectMessage = ""
@@ -415,7 +778,13 @@ class GameViewModel: ObservableObject {
         gameOverTimer?.invalidate()
         countdownTimer?.invalidate()
         typewriterTimer?.invalidate()
+        readinessTimer?.invalidate()
         isAnimating = false
+        
+        // Reset completion tracking for new game
+        currentGameCompletion = nil
+        isPlayingPreviousGame = false
+        
         setupInitialWordChain()
     }
     
@@ -440,8 +809,8 @@ class GameViewModel: ObservableObject {
     
     // MARK: - Game Over Sequence
     private func startGameOverSequence() {
-        // Wait 2.5 seconds, then start countdown
-        gameOverTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
+        // Wait before starting countdown
+        gameOverTimer = Timer.scheduledTimer(withTimeInterval: GameConstants.Animation.gameOverSequenceDelay, repeats: false) { [weak self] _ in
             self?.startCountdownToMidnight()
         }
     }
@@ -452,8 +821,8 @@ class GameViewModel: ObservableObject {
         let initialMessage = "⏰ Next puzzle in \(formatTime(timeUntilMidnight))"
         animateMessageChange(to: initialMessage)
         
-        // Update every second
-        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Update countdown regularly
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: GameConstants.Animation.countdownUpdateInterval, repeats: true) { [weak self] _ in
             self?.updateCountdownMessage()
         }
     }
@@ -507,15 +876,15 @@ class GameViewModel: ObservableObject {
         
         var wipeInterval: TimeInterval {
             switch self {
-            case .fast: return 0.005
-            case .normal: return 0.015
+            case .fast: return GameConstants.Animation.messageWipeSpeedFast
+            case .normal: return GameConstants.Animation.messageWipeSpeedNormal
             }
         }
         
         var typeInterval: TimeInterval {
             switch self {
-            case .fast: return 0.008
-            case .normal: return 0.025
+            case .fast: return GameConstants.Animation.messageTypeSpeedFast
+            case .normal: return GameConstants.Animation.messageTypeSpeedNormal
             }
         }
     }
@@ -575,5 +944,63 @@ class GameViewModel: ObservableObject {
                 completion?()
             }
         }
+    }
+    
+    // MARK: - Word Status Helpers
+    enum WordStatus {
+        case completed
+        case incomplete
+        case inProgress
+        case notStarted
+    }
+    
+    func getWordStatus(for index: Int) -> WordStatus {
+        // First and last words are always fully revealed, so don't show indicators for them
+        if index == 0 || index == fullWords.count - 1 {
+            return .notStarted
+        }
+        
+        // Check if all letters of this word are revealed
+        func isWordFullyRevealed(at wordIndex: Int) -> Bool {
+            guard wordIndex < fullWords.count else { return false }
+            let word = fullWords[wordIndex]
+            let revealedCount = revealedLetters[wordIndex] ?? 1 // Default to 1 for middle words
+            return revealedCount >= word.count
+        }
+        
+        // If the game is completed, determine status based on final state
+        if let completion = currentGameCompletion, completion.isCompleted {
+            if index < currentWordIndex {
+                // Word was correctly guessed (moved past it)
+                return .completed
+            } else if isWordFullyRevealed(at: index) {
+                // Word had all letters revealed through hints
+                return .completed
+            } else {
+                // Word was incomplete
+                return .incomplete
+            }
+        }
+        
+        // For active games
+        if index < currentWordIndex {
+            // Word was correctly guessed (moved past it)
+            return .completed
+        } else if isWordFullyRevealed(at: index) {
+            // Word is fully revealed through hints during active game
+            return .completed
+        } else if index == currentWordIndex {
+            return .inProgress
+        } else {
+            return .notStarted
+        }
+    }
+    
+    deinit {
+        // Clean up timers
+        readinessTimer?.invalidate()
+        gameOverTimer?.invalidate()
+        countdownTimer?.invalidate()
+        typewriterTimer?.invalidate()
     }
 }

@@ -23,6 +23,13 @@ class PuzzleService: ObservableObject {
     }
     
     // MARK: - Public Methods
+    func clearCache() {
+        print("🗑️ Clearing puzzle cache")
+        todaysPuzzle = nil
+        lastFetchError = nil
+        isLoading = false
+    }
+    
     func fetchTodaysPuzzle() async {
         await MainActor.run {
             isLoading = true
@@ -84,8 +91,8 @@ class PuzzleService: ObservableObject {
             throw PuzzleError.noPuzzleForToday
         }
         
-        // Validate puzzle has 12 words
-        guard todaysPuzzle.words.count == 12 else {
+        // Validate puzzle has expected number of words
+        guard todaysPuzzle.words.count == GameConstants.expectedWordCount else {
             throw PuzzleError.invalidPuzzleFormat
         }
         

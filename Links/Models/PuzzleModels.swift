@@ -24,13 +24,10 @@ struct DailyPuzzle: Codable {
     }
 }
 
-// Fallback puzzle if server fails
+// Fallback puzzle marker for server failures - no actual game content
 extension DailyPuzzle {
     static let fallback = DailyPuzzle(
         date: "fallback",
-        words: [
-            "ROAD", "KILL", "TIME", "ZONE", "DEFENSE", "SYSTEM", 
-            "ERROR", "MESSAGE", "BOARD", "GAME", "OVER", "DRIVE"
-        ]
+        words: [] // Empty words array - server error state will handle the UI
     )
 }
