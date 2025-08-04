@@ -118,7 +118,7 @@ struct InfoView: View {
             infoItem(
                 icon: "heart.fill",
                 title: "lives system",
-                description: "start with 5 lives. wrong guesses cost 1 life. invalid words don't count."
+                description: "start with 10 lives. wrong guesses cost 1 life. invalid words don't count."
             )
             
             infoItem(

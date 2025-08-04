@@ -14,7 +14,7 @@ import SwiftData
 class GameViewModel: ObservableObject {
     // MARK: - Published Properties
     @Published var currentGuess: String = ""
-    @Published var currentLives: Int = 5
+    @Published var currentLives: Int = GameConstants.maxLives
     @Published var currentPrompt: String = ""
     @Published var displayedPrompt: String = ""
     @Published var displayedFirstLine: String = ""

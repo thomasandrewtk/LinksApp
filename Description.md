@@ -13,7 +13,7 @@ Links is a daily word puzzle game with a terminal/console aesthetic. Players mus
 - Each word is connected to the next word in some logical way (themes, categories, word associations, etc.)
 
 ### Lives System
-- Players start with 5 lives (♥ counter in top-right)
+- Players start with 10 lives (♥ counter in top-right)
 - Incorrect guesses cost 1 life
 - Invalid words (not in dictionary) don't cost lives
 - Game ends when lives reach 0
@@ -42,7 +42,7 @@ Links is a daily word puzzle game with a terminal/console aesthetic. Players mus
 
 #### Header Section
 ```
-Links/daily                    ♥ 5
+Links/daily                    ♥ 10
 ─────────────────────────────────
 ```
 - **Title**: "Links/daily" with monospace font
@@ -72,7 +72,7 @@ Links/daily                    ♥ 5
 
 #### Published Properties
 - `currentGuess`: User's current input
-- `currentLives`: Remaining lives (0-5)
+- `currentLives`: Remaining lives (0-10)
 - `wordChain`: Array of words showing current reveal state
 - `isGameActive`: Whether player can make guesses
 - `isAnimating`: Prevents input during animations

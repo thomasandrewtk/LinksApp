@@ -9,7 +9,7 @@ import Foundation
 
 struct GameConstants {
     // MARK: - Game Configuration
-    static let maxLives: Int = 5
+    static let maxLives: Int = 10
     static let expectedWordCount: Int = 12
     static let startingWordIndex: Int = 1 // Index of first word to guess (second word in chain)
     
