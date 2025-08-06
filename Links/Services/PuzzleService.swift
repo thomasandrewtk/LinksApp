@@ -53,18 +53,34 @@ class PuzzleService: ObservableObject {
         }
     }
     
+    func fetchPuzzleForDate(_ dateString: String) async throws -> DailyPuzzle {
+        do {
+            let puzzle = try await fetchPuzzleFromServer(for: dateString)
+            print("✅ Fetched puzzle for \(dateString): \(puzzle.date)")
+            return puzzle
+        } catch {
+            print("❌ Failed to fetch puzzle for \(dateString): \(error)")
+            throw error
+        }
+    }
+    
     // MARK: - Private Methods
-    private func fetchPuzzleFromServer() async throws -> DailyPuzzle {
-        // Create date string for today
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        let todayString = formatter.string(from: Date())
+    private func fetchPuzzleFromServer(for dateString: String? = nil) async throws -> DailyPuzzle {
+        // Use provided date or default to today
+        let targetDate: String
+        if let dateString = dateString {
+            targetDate = dateString
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            targetDate = formatter.string(from: Date())
+        }
         
         // Build URL with date query parameter
         guard var urlComponents = URLComponents(string: serverURL) else {
             throw PuzzleError.invalidURL
         }
-        urlComponents.queryItems = [URLQueryItem(name: "date", value: todayString)]
+        urlComponents.queryItems = [URLQueryItem(name: "date", value: targetDate)]
         
         guard let url = urlComponents.url else {
             throw PuzzleError.invalidURL
@@ -86,17 +102,17 @@ class PuzzleService: ObservableObject {
         // Parse JSON response
         let puzzleResponse = try JSONDecoder().decode(PuzzleResponse.self, from: data)
         
-        // Find today's puzzle
-        guard let todaysPuzzle = puzzleResponse.puzzles.first(where: { $0.isToday }) else {
+        // Find the puzzle for the target date
+        guard let targetPuzzle = puzzleResponse.puzzles.first(where: { $0.date == targetDate }) else {
             throw PuzzleError.noPuzzleForToday
         }
         
         // Validate puzzle has expected number of words
-        guard todaysPuzzle.words.count == GameConstants.expectedWordCount else {
+        guard targetPuzzle.words.count == GameConstants.expectedWordCount else {
             throw PuzzleError.invalidPuzzleFormat
         }
         
-        return todaysPuzzle
+        return targetPuzzle
     }
     
     private func setupMidnightTimer() {

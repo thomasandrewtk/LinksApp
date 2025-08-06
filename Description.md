@@ -50,10 +50,13 @@ Links/daily                    ♥ 10
 - **Lives Counter**: Red heart symbol with remaining lives count
 - **Divider**: Separates header from game content
 
-#### Main Content Area
-- **First Line**: Animated intro text or error message
-- **Word Chain**: Vertical list of words showing current game state
-- **Host Messages**: Animated prompts and feedback from the game
+#### Main Content Area (Terminal Display)
+- **30-Line Terminal**: Fixed-position terminal with consistent line spacing
+- **Line 1**: Animated intro text ("Can you solve today's links? [date]")
+- **Lines 3-14**: Word chain display with typewriter animations
+- **Line 18**: Host messages and game prompts
+- **Line 20**: Streak/score information after completion
+- **Line 22**: Navigation links (yesterday's game, etc.)
 
 #### Input Area (Bottom)
 - **Text Field**: Monospace input for word guesses
@@ -66,41 +69,99 @@ Links/daily                    ♥ 10
 - **Typography**: Monospace fonts throughout for authentic terminal feel
 - **Animations**: Typewriter effects and smooth transitions
 
-## GameViewModel.swift - Core Logic
+## Component-Based Architecture
 
-### State Management
+The game uses a modern component-based architecture that replaced the monolithic GameViewModel with specialized, focused components.
 
-#### Published Properties
-- `currentGuess`: User's current input
+### Core Components
+
+#### TodayGameContent.swift - Game Logic Controller
+**Role**: Manages game state, puzzle loading, and business logic
+**Published Properties**:
+- `isActive`: Whether player can make guesses
 - `currentLives`: Remaining lives (0-10)
-- `wordChain`: Array of words showing current reveal state
-- `isGameActive`: Whether player can make guesses
-- `isAnimating`: Prevents input during animations
-- `isContentReady`: Whether game content has loaded
-- `showFirstLine`: Controls intro text visibility
 - `hasServerError`: Whether to show error state instead of game
 
-#### Game Data
+**Private State**:
 - `fullWords`: Complete word chain from puzzle service
 - `currentWordIndex`: Index of word player is currently guessing
 - `revealedLetters`: Dictionary tracking revealed letters per word
 - `currentGameCompletion`: SwiftData record for persistence
 
-### Animation System
+#### TerminalViewModel.swift - Display Controller
+**Role**: Manages the 30-line terminal display and animation queue system
+**Configuration**:
+- `totalLines`: 30 fixed terminal lines
+- `visibleLines`: 25 lines reserved for content display
 
-#### Typewriter Effects
-The game features sophisticated typewriter animations for authentic terminal feel:
+**Published Properties**:
+- `lines`: Array of TerminalLine objects (one per line)
+- `isProcessingQueue`: Whether animations are currently running
 
-1. **First Line Animation**: Intro text types out character by character
-2. **Word Chain Animation**: All words reveal simultaneously, character by character
-3. **Message Animation**: Host messages wipe old text then type new text
-4. **Two-speed System**: Fast animations for hints, normal for major transitions
+**Animation System**:
+- Queue-based command processing (writeLine, replaceLine, parallel, completion)
+- Robust error handling and state management
+- Thread-safe animation sequencing
 
-#### Animation Sequence on Game Start
-1. Show first line: "Can you solve today's links? [date]"
-2. Animate word chain appearing simultaneously
-3. Show host message asking for first guess
-4. Activate game for user input
+#### TerminalLine.swift - Individual Line Management
+**Role**: Handles typewriter animation and content for a single terminal line
+**Published Properties**:
+- `content`: Full line content
+- `displayedContent`: Currently visible content during animation
+- `isAnimating`: Whether this line is currently animating
+
+**Animation Features**:
+- Character-by-character typewriter effects
+- Wipe-and-replace animations for content updates
+- Completion callback system for chaining animations
+
+### SwiftUI View Architecture
+
+#### TerminalView.swift - Display Components
+**TerminalView**: Full terminal view with line numbers (for debugging)
+**TerminalViewSimple**: Clean terminal display used in game (no line numbers)
+**TerminalLineView**: Individual line component with proper SwiftUI binding
+
+**Critical SwiftUI Fix**:
+```swift
+// BEFORE (broken): Direct property access in ForEach
+ForEach(viewModel.lines, id: \.id) { line in
+    Text(line.displayedContent)  // SwiftUI doesn't observe this
+}
+
+// AFTER (fixed): Dedicated view component  
+ForEach(viewModel.lines, id: \.id) { line in
+    TerminalLineView(line: line)  // @ObservedObject ensures updates
+}
+```
+
+### Terminal Display System
+
+#### Line Layout
+The 30-line terminal uses fixed positioning for consistent display:
+- **Line 1**: Intro message ("Can you solve today's links? [date]")
+- **Lines 3-14**: Word chain display (12 words maximum)
+- **Line 18**: Game prompts and host messages
+- **Line 20**: Streak/score information
+- **Line 22**: Navigation links (yesterday's game, etc.)
+
+#### Animation Queue Architecture
+**Command Types**:
+- `writeLine`: Animate text appearing on a specific line
+- `replaceLine`: Wipe existing text and type new content
+- `parallel`: Execute multiple animations simultaneously
+- `completion`: Chain callback functions for sequence control
+- `delay`: Add pauses between animations
+
+**Animation Sequence on Game Start**:
+1. **Queue Commands**: First line animation + completion handler
+2. **Execute First Line**: "Can you solve today's links? [date]"
+3. **Completion Trigger**: Automatically starts word chain animation
+4. **Parallel Word Display**: All 12 words animate simultaneously
+5. **Final Prompt**: Show game prompt and activate input
+
+#### SwiftUI Integration
+**Critical Fix Applied**: `TerminalLineView` component with `@ObservedObject` binding ensures SwiftUI properly observes changes to individual `TerminalLine` objects. Previous architecture failed because `ForEach` didn't automatically observe nested `ObservableObject` changes.
 
 ### Puzzle Loading & Persistence
 
@@ -207,20 +268,24 @@ The game features randomized personality messages to avoid repetition:
 - Resets game progress tracking
 - Clears message history to prevent stale state
 
-### Timer Management
+### Component Coordination
 
-The game uses multiple coordinated timers:
+#### Inter-Component Communication
+- **GameView**: Orchestrates `TodayGameContent` and `TerminalViewModel`
+- **Configuration**: `TodayGameContent.configure(with: terminalViewModel)` establishes connection
+- **Animation Flow**: `TodayGameContent` queues commands to `TerminalViewModel`
+- **State Sync**: Published properties trigger UI updates through SwiftUI's reactive system
 
-#### System Timers
+#### Timer Management
+**TodayGameContent Timers**:
 - **Readiness Timer**: Polls for SwiftData availability
-- **Typewriter Timer**: Handles character-by-character animations
 - **Game Over Timer**: Delays countdown start after game completion
 - **Countdown Timer**: Updates time until next puzzle
 
-#### Timer Lifecycle
-- Proper invalidation on state changes
-- Memory leak prevention with weak self references
-- Cleanup in deinit and reset functions
+**TerminalLine Timers**:
+- **Animation Timers**: Individual timers per line for typewriter effects
+- **Automatic Cleanup**: Proper invalidation and memory management
+- **Completion Callbacks**: Trigger next animation in queue
 
 ### Error Recovery & Edge Cases
 
@@ -241,33 +306,52 @@ The game uses multiple coordinated timers:
 
 ## Technical Implementation Details
 
+### SwiftUI Binding Architecture
+**Key Fix**: `TerminalLineView` component ensures proper observation of nested `ObservableObject` instances
+```swift
+struct TerminalLineView: View {
+    @ObservedObject var line: TerminalLine  // Critical for UI updates
+    // ... styling properties
+}
+```
+**Problem Solved**: SwiftUI's `ForEach` doesn't automatically observe `@Published` properties of objects passed to closures. The dedicated view component with `@ObservedObject` binding resolves this.
+
 ### State Synchronization
-- Reactive UI updates through `@Published` properties
-- Combine framework for puzzle service subscriptions
-- Proper main actor usage for UI updates
+- **Component Isolation**: Each component manages its own `@Published` properties
+- **Reactive Updates**: SwiftUI automatically updates when `TerminalLine.displayedContent` changes
+- **Combine Framework**: Puzzle service subscriptions for midnight refresh
+- **Main Actor Usage**: All UI updates properly dispatched to main thread
 
 ### Performance Considerations
-- Efficient string manipulation for typewriter effects
-- Minimal UI updates during animations
-- Proper timer management to prevent memory leaks
+- **30-Line Limit**: Fixed terminal size prevents unbounded UI complexity
+- **Individual Timers**: Each line manages its own animation independently
+- **Efficient Updates**: Only animating lines trigger UI refreshes
+- **Queue Management**: Animation commands processed sequentially for consistency
 
-### Accessibility
-- VoiceOver support through standard SwiftUI components
-- High contrast terminal color scheme
-- Clear focus management for input field
+### Animation Robustness
+**Critical Bug Fixed**: Completion callback preservation in `TerminalLine.finishAnimation()`
+```swift
+// BEFORE (broken): cancelAnimation() cleared callback
+// AFTER (fixed): Save callback before cleanup
+let completion = animationCompletion
+cancelAnimation()
+completion?()
+```
 
 ### Memory Management
-- Weak references in timer closures
-- Proper cleanup of resources in deinit
-- Efficient string operations for large word chains
+- **Weak References**: All timer closures use `[weak self]` pattern
+- **Automatic Cleanup**: `deinit` methods properly invalidate timers
+- **Component Lifecycle**: Each component manages its own resources independently
 
 ## Game Flow Summary
 
-1. **App Launch**: Initialize SwiftData, load daily puzzle
-2. **Content Animation**: Show intro, animate word chain appearance
-3. **Game Activation**: Enable input, show first prompt
-4. **Guess Loop**: Process guesses, give hints, advance words
-5. **Game End**: Show victory/defeat, start countdown to next puzzle
-6. **Persistence**: Save progress throughout, restore on next launch
+1. **App Launch**: Initialize SwiftData, configure component connections
+2. **Component Setup**: `GameView` creates `TerminalViewModel` and `TodayGameContent`
+3. **Content Loading**: `TodayGameContent` loads puzzle and configures terminal
+4. **Animation Sequence**: Queue-based system animates intro → word chain → prompt
+5. **Game Activation**: Terminal animations complete, input field becomes active
+6. **Guess Processing**: `TodayGameContent` handles logic, `TerminalViewModel` shows results
+7. **Game End**: Show victory/defeat through terminal, start countdown to next puzzle
+8. **Persistence**: `GameCompletionService` saves progress throughout session
 
-This architecture creates a polished, engaging word puzzle experience with authentic terminal aesthetics and robust state management.
+This component-based architecture creates a polished, engaging word puzzle experience with authentic terminal aesthetics, robust animation systems, and maintainable code separation.

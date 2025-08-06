@@ -181,6 +181,12 @@ class GameCompletionService: ObservableObject {
         return completion?.isCompleted == false ? completion : nil
     }
     
+    /// Get yesterday's game completion (whether complete or incomplete)
+    func getYesterdayGameCompletion() -> GameCompletion? {
+        let yesterdayDate = GameCompletion.yesterdayDateString()
+        return getGameCompletion(for: yesterdayDate)
+    }
+    
     // MARK: - Statistics
     
     /// Get completion statistics
@@ -207,6 +213,75 @@ class GameCompletionService: ObservableObject {
             print("❌ Error fetching stats: \(error)")
             return (0, 0, 0.0)
         }
+    }
+    
+    /// Get current daily win streak (consecutive wins ending today or yesterday)
+    func getCurrentDailyStreak() -> Int {
+        guard let context = modelContext else { return 0 }
+        
+        // Get all completed games, sorted by date descending (most recent first)
+        let completedPredicate = #Predicate<GameCompletion> { completion in
+            completion.isCompleted
+        }
+        let descriptor = FetchDescriptor<GameCompletion>(
+            predicate: completedPredicate,
+            sortBy: [SortDescriptor(\.gameDate, order: .reverse)]
+        )
+        
+        do {
+            let completedGames = try context.fetch(descriptor)
+            guard !completedGames.isEmpty else { return 0 }
+            
+            // Calculate streak by walking backwards from most recent game
+            var streak = 0
+            let calendar = Calendar.current
+            let today = Date()
+            
+            // Start from today and work backwards
+            var checkDate = today
+            
+            for game in completedGames {
+                let gameDate = Self.dateFromString(game.gameDate)
+                
+                // If this game is from the date we're checking and was won, continue streak
+                if calendar.isDate(gameDate, inSameDayAs: checkDate) && game.didWin {
+                    streak += 1
+                    // Move to previous day
+                    checkDate = calendar.date(byAdding: .day, value: -1, to: checkDate) ?? checkDate
+                } else if calendar.isDate(gameDate, inSameDayAs: checkDate) && !game.didWin {
+                    // Game was lost on this date, streak ends
+                    break
+                } else {
+                    // No game on this date, check if we should continue looking backwards
+                    // Only continue if we haven't started the streak yet (allows for missed days at start)
+                    if streak > 0 {
+                        break
+                    }
+                    checkDate = calendar.date(byAdding: .day, value: -1, to: checkDate) ?? checkDate
+                }
+            }
+            
+            return streak
+        } catch {
+            print("❌ Error calculating streak: \(error)")
+            return 0
+        }
+    }
+    
+    /// Get score information for a completed game
+    func getGameScore(for gameDate: String) -> (correct: Int, incorrect: Int) {
+        guard let completion = getGameCompletion(for: gameDate), completion.isCompleted else {
+            return (0, 0)
+        }
+        
+        return (correct: completion.wordsCompleted, incorrect: completion.livesUsed)
+    }
+    
+    /// Helper to convert date string to Date
+    private static func dateFromString(_ dateString: String) -> Date {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: dateString) ?? Date()
     }
     
     // MARK: - Cleanup

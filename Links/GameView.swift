@@ -8,12 +8,21 @@
 import SwiftUI
 import UIKit
 
+enum GameMode {
+    case today
+    case yesterday
+}
+
 struct GameView: View {
-    // MARK: - ViewModel
-    @StateObject private var viewModel = GameViewModel()
+    // MARK: - ViewModels
+    @StateObject private var terminalViewModel = TerminalViewModel()
+    @StateObject private var todayGameContent = TodayGameContent()
+    @StateObject private var yesterdayGameContent = YesterdayGameContent()
     @FocusState private var isTextFieldFocused: Bool
     @State private var isWiping = false
     @State private var showingInfo = false
+    @State private var currentInput: String = ""
+    @State private var currentMode: GameMode = .today
     
     // MARK: - Color Scheme (Always Dark Mode)
     private var backgroundColor: Color {
@@ -26,11 +35,18 @@ struct GameView: View {
     
     // MARK: - Computed Properties
     private var canSubmit: Bool {
-        viewModel.isGameActive && 
-        viewModel.isContentReady &&
-        !viewModel.isAnimating && 
-        !viewModel.hasServerError &&
-        !viewModel.currentGuess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        switch currentMode {
+        case .today:
+            return todayGameContent.isActive &&
+                   !terminalViewModel.isAnimating &&
+                   !todayGameContent.hasServerError &&
+                   !currentInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .yesterday:
+            return yesterdayGameContent.isActive &&
+                   !terminalViewModel.isAnimating &&
+                   !yesterdayGameContent.hasServerError &&
+                   !currentInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
     
     var body: some View {
@@ -38,11 +54,10 @@ struct GameView: View {
             // Header anchored to top
             headerView
             
-            // Game content starts right below header
-            puzzleContentView
-            
-            // Spacer pushes input to bottom
-            Spacer()
+            // Terminal content with tap detection
+            TerminalViewSimple(viewModel: terminalViewModel)
+                .frame(maxHeight: .infinity)
+                .onTapGesture(count: 1, perform: handleTerminalTap)
             
             // Input area anchored to bottom
             inputArea
@@ -53,11 +68,23 @@ struct GameView: View {
             InfoView()
         }
         .onAppear {
-            isTextFieldFocused = false // Start unfocused
+            print("🎮 GameView appeared")
+            isTextFieldFocused = false
+            todayGameContent.configure(with: terminalViewModel)
+            yesterdayGameContent.configure(with: terminalViewModel)
+            startCurrentGame()
         }
-        .onChange(of: viewModel.isGameActive) { _, isActive in
-            if isActive {
-                // Focus text field when game becomes active
+        .onChange(of: todayGameContent.isActive) { _, isActive in
+            if currentMode == .today && isActive && !todayGameContent.isGameCompleted {
+                // Focus text field when today's game becomes active (only for incomplete games)
+                DispatchQueue.main.asyncAfter(deadline: .now() + GameConstants.Animation.gameActivationDelay) {
+                    isTextFieldFocused = true
+                }
+            }
+        }
+        .onChange(of: yesterdayGameContent.isActive) { _, isActive in
+            if currentMode == .yesterday && isActive && !yesterdayGameContent.isGameCompleted {
+                // Focus text field when yesterday's game becomes active (only for incomplete games)
                 DispatchQueue.main.asyncAfter(deadline: .now() + GameConstants.Animation.gameActivationDelay) {
                     isTextFieldFocused = true
                 }
@@ -69,7 +96,7 @@ struct GameView: View {
     private var headerView: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                Text("Links/daily")
+                Text(currentMode == .today ? "Links/daily" : "Links/yesterday")
                     .font(.system(size: 18, weight: .medium, design: .monospaced))
                     .foregroundColor(isWiping ? .red : textColor)
                     .scaleEffect(isWiping ? 1.1 : 1.0)
@@ -98,7 +125,7 @@ struct GameView: View {
                         }
                         
                         // Wipe data
-                        viewModel.wipeAllDataAndReset()
+                        wipeAllDataAndReset()
                     }
                 
                 Spacer()
@@ -108,7 +135,7 @@ struct GameView: View {
                     Text("♥")
                         .font(.system(size: 16, weight: .medium, design: .monospaced))
                         .foregroundColor(.red)
-                    Text("\(viewModel.currentLives)")
+                    Text("\(currentMode == .today ? todayGameContent.currentLives : yesterdayGameContent.currentLives)")
                         .font(.system(size: 18, weight: .medium, design: .monospaced))
                         .foregroundColor(.red)
                 }
@@ -121,79 +148,12 @@ struct GameView: View {
         }
         .background(backgroundColor)
     }
-    
-    // MARK: - Main Puzzle Content
-    private var puzzleContentView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Show the first line once content is ready
-            if viewModel.showFirstLine {
-                // First line (typewritten) - could be puzzle intro or server error
-                Text(viewModel.displayedFirstLine)
-                    .font(.system(size: 14, design: .monospaced))
-                    .foregroundColor(textColor)
-                
-                // Only show game content if no server error
-                if !viewModel.hasServerError {
-                    // Show word chain if it has content (starts animating after first line)
-                    if !viewModel.wordChain.isEmpty {
-                        // Empty line for spacing
-                        Text("")
-                        
-                        // Word chain display
-                        ForEach(Array(viewModel.wordChain.enumerated()), id: \.offset) { index, word in
-                            HStack(spacing: 4) {
-                                Text(word)
-                                    .font(.system(size: 14, design: .monospaced))
-                                    .foregroundColor(textColor)
-                                
-                                // Status indicator
-                                statusIndicator(for: index)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        
-                        // Show host message when there's content to display
-                        if !viewModel.displayedPrompt.isEmpty {
-                            // Empty line for spacing
-                            Text("")
-                            
-                            // Host message (typewritten)
-                            Text(viewModel.displayedPrompt)
-                                .font(.system(size: 14, design: .monospaced))
-                                .foregroundColor(textColor)
-                        }
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    
-    // MARK: - Status Indicator
-    @ViewBuilder
-    private func statusIndicator(for index: Int) -> some View {
-        let status = viewModel.getWordStatus(for: index)
-        
-        switch status {
-        case .completed:
-            Image(systemName: "checkmark")
-                .font(.system(size: 12))
-                .foregroundColor(.green)
-        case .incomplete:
-            Image(systemName: "xmark")
-                .font(.system(size: 12))
-                .foregroundColor(.red)
-        case .inProgress, .notStarted:
-            EmptyView()
-        }
-    }
+
     
     // MARK: - Input Area
     private var inputArea: some View {
         HStack(alignment: .center, spacing: 4) {
-            TextField("type a message...", text: $viewModel.currentGuess)
+            TextField("type a message...", text: $currentInput)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14, design: .monospaced))
                 .foregroundColor(textColor)
@@ -202,10 +162,17 @@ struct GameView: View {
                 .disableAutocorrection(true)
                 .keyboardType(.asciiCapable)
                 .focused($isTextFieldFocused)
-                .disabled(!viewModel.isGameActive || !viewModel.isContentReady || viewModel.hasServerError)
+                .disabled({
+                    switch currentMode {
+                    case .today:
+                        return !todayGameContent.isActive || todayGameContent.hasServerError
+                    case .yesterday:
+                        return !yesterdayGameContent.isActive || yesterdayGameContent.hasServerError
+                    }
+                }())
                 .onSubmit {
                     if canSubmit {
-                        viewModel.submitGuess()
+                        submitGuess()
                         isTextFieldFocused = true
                     }
                 }
@@ -213,7 +180,7 @@ struct GameView: View {
             
             Button(action: {
                 if canSubmit {
-                    viewModel.submitGuess()
+                    submitGuess()
                     isTextFieldFocused = true
                 }
             }) {
@@ -229,7 +196,118 @@ struct GameView: View {
             isTextFieldFocused = true
         }
     }
-
+    
+    // MARK: - Actions
+    private func submitGuess() {
+        switch currentMode {
+        case .today:
+            todayGameContent.handleInput(currentInput)
+        case .yesterday:
+            yesterdayGameContent.handleInput(currentInput)
+        }
+        currentInput = ""
+    }
+    
+    private func startCurrentGame() {
+        switch currentMode {
+        case .today:
+            todayGameContent.start()
+        case .yesterday:
+            yesterdayGameContent.start()
+        }
+    }
+    
+    private func handleTerminalTap() {
+        print("🧪 DEBUG: Terminal tap detected")
+        print("🧪 DEBUG: Current mode: \(currentMode)")
+        
+        // Debug: Show content of lines around the navigation area
+        for i in 18...25 {
+            let content = terminalViewModel.getContent(at: i)
+            if !content.isEmpty {
+                print("🧪 DEBUG: Line \(i+1): '\(content)'")
+            }
+        }
+        
+        // Check navigation line (Line 22, 0-indexed is 21)
+        let navigationLineContent = terminalViewModel.getContent(at: 21)
+        print("🧪 DEBUG: Navigation line content: '\(navigationLineContent)'")
+        
+        // Check navigation line first
+        if navigationLineContent.lowercased().contains("[yesterday]") && currentMode == .today {
+            print("🔗 Navigating to yesterday's game")
+            switchToYesterday()
+            return
+        } else if navigationLineContent.lowercased().contains("[today]") && currentMode == .yesterday {
+            print("🔗 Navigating to today's game")
+            switchToToday()
+            return
+        }
+        
+        // If navigation line doesn't match, check all terminal content for navigation links
+        let allTerminalContent = (0..<30).map { terminalViewModel.getContent(at: $0) }.joined(separator: " ")
+        print("🧪 DEBUG: Checking all terminal content for navigation...")
+        
+        if allTerminalContent.lowercased().contains("[yesterday]") && currentMode == .today {
+            print("🔗 Found [yesterday] in terminal, navigating to yesterday's game")
+            switchToYesterday()
+        } else if allTerminalContent.lowercased().contains("[today]") && currentMode == .yesterday {
+            print("🔗 Found [today] in terminal, navigating to today's game")
+            switchToToday()
+        } else {
+            print("🧪 DEBUG: No navigation match found in any content")
+            print("🧪 DEBUG: Looking for '[yesterday]' in today mode or '[today]' in yesterday mode")
+        }
+    }
+    
+    private func switchToYesterday() {
+        print("🔄 Switching to yesterday mode")
+        currentMode = .yesterday
+        todayGameContent.pauseTimers()  // Stop today's timers to prevent interference
+        terminalViewModel.clearAllImmediate()
+        yesterdayGameContent.start()
+    }
+    
+    private func switchToToday() {
+        print("🔄 Switching to today mode")
+        currentMode = .today
+        todayGameContent.resumeTimers()  // IMPORTANT: Resume timers BEFORE clearing terminal
+        terminalViewModel.clearAllImmediate()
+        todayGameContent.start()
+    }
+    
+    private func wipeAllDataAndReset() {
+        print("🧨 DEBUG: Wiping all data and completely reinitializing app...")
+        
+        // Clear the terminal
+        terminalViewModel.clearAllImmediate()
+        
+        // Wipe all SwiftData
+        GameCompletionService.shared.wipeAllData()
+        
+        // Clear all notifications
+        Task {
+            await NotificationManager.shared.clearAllNotifications()
+        }
+        
+        // Clear cache
+        PuzzleService.shared.clearCache()
+        
+        // Reset game content
+        todayGameContent.reset()
+        yesterdayGameContent.reset()
+        currentMode = .today
+        
+        // Give a brief moment for everything to settle, then restart
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.startCurrentGame()
+            
+            // Reschedule notifications
+            Task {
+                await NotificationManager.shared.requestPermissionAndSchedule()
+            }
+        }
+    }
 }
 
 // MARK: - Preview
